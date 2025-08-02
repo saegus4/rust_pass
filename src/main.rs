@@ -1,4 +1,7 @@
 use std::{env, fs::{self, File}, io::{self, Write}, path::{Path, PathBuf}, process::Command};
+use std::process::Stdio;
+
+use passwords::PasswordGenerator;
 
 fn main() {
     let args: Vec<String> = env::args().collect();
@@ -8,8 +11,47 @@ fn main() {
     match command.as_str() {
         "init" => init_pass_vault(args),
         "insert" => insert_password(args),
+        "generate" => generate_password(args),
         _ => get_password_value(args),
     }
+}
+
+fn generate_password(args: Vec<String>) {
+    let name = &args[3];
+    let password = PasswordGenerator {
+        length: 18,
+        numbers: true,
+        lowercase_letters: true,
+        uppercase_letters: true, 
+        symbols: true, 
+        spaces: false, 
+        exclude_similar_characters: false,
+        strict: true,
+    };
+    let generated_password = password.generate_one().unwrap();
+    let key = fs::read_to_string("passwords/.gpg-id").expect("Failed to read gpg id file").trim().to_owned();
+
+    create_gpg_file(&generated_password, key, name);
+    copy_with_wl_copy(&generated_password).expect("clipboard copy failed");
+}
+
+fn create_gpg_file(password: &str, key: String, name: &String) {
+    let mut temp_password_file = File::create("passwords/temp").expect("Failed to create temp file");
+    temp_password_file.write_all(password.as_bytes()).expect("Failed to write temp file");
+
+    let password_file_name = format!("passwords/{}.gpg", name);
+    Command::new("gpg")
+        .arg("--batch")
+        .arg("--yes")
+        .arg("--encrypt")
+        .arg("--recipient")
+        .arg(&key)
+        .arg("--output")
+        .arg(&password_file_name)
+        .arg("passwords/temp")
+        .output().unwrap();
+
+    fs::remove_file("passwords/temp").expect("Failed to remove temp file");
 }
 
 fn insert_password(args: Vec<String>) {
@@ -22,24 +64,9 @@ fn insert_password(args: Vec<String>) {
     if !(password == second_password) {
         println!("Error: the entered passwords do not match.");
     }
-
-    let mut temp_password_file = File::create("passwords/temp").expect("Failed to create temp file");
-    temp_password_file.write_all(&password.into_bytes()).expect("Failed to write temp file");
-
     let key = fs::read_to_string("passwords/.gpg-id").expect("Failed to read gpg id file").trim().to_owned();
-    let password_file_name = format!("passwords/{}.gpg", name);
-    let output = Command::new("gpg")
-        .arg("--batch")
-        .arg("--yes")
-        .arg("--encrypt")
-        .arg("--recipient")
-        .arg(&key)
-        .arg("--output")
-        .arg(&password_file_name)
-        .arg("passwords/temp")
-        .output().unwrap();
 
-    fs::remove_file("passwords/temp").expect("Failed to remove temp file");
+    create_gpg_file(&password, key, name);
 }
 
 fn init_pass_vault(args: Vec<String>) {
@@ -63,18 +90,28 @@ fn init_pass_vault(args: Vec<String>) {
 
 fn get_password_value(args: Vec<String>) {
     let name = &args[2];
+    let path = format!("passwords/{name}.gpg");
 
-    let file_path: PathBuf = home::home_dir()
-        .expect("Home not found")
-        .join(".password-store")
-        .join(format!("{name}.gpg"));
 
     let output = Command::new("gpg")
         .arg("--batch")
         .arg("--yes")
         .arg("--decrypt")
-        .arg(&file_path)
+        .arg(path)
         .output().unwrap();
 
     println!("{}", String::from_utf8_lossy(&output.stdout));
+}
+
+fn copy_with_wl_copy(text: &str) -> std::io::Result<()> {
+    let mut child = Command::new("wl-copy")
+        .stdin(Stdio::piped())
+        .spawn()?;                      
+
+    if let Some(stdin) = &mut child.stdin {
+        stdin.write_all(text.as_bytes())?;
+    }
+
+    child.wait()?;
+    Ok(())
 }
